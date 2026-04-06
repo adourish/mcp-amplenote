@@ -1,0 +1,4 @@
+node_modules/
+amplenote-config.json
+*.env
+.DS_Store

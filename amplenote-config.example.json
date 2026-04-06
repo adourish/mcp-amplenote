@@ -1,0 +1,14 @@
+{
+  "oauth": {
+    "clientId": "YOUR_CLIENT_ID",
+    "redirectUri": "http://localhost:8080/callback",
+    "authUrl": "https://login.amplenote.com/login",
+    "tokenUrl": "https://api.amplenote.com/oauth/token"
+  },
+  "credentials": {
+    "accessToken": "YOUR_ACCESS_TOKEN",
+    "refreshToken": "YOUR_REFRESH_TOKEN",
+    "tokenType": "Bearer",
+    "expiresIn": 7200
+  }
+}

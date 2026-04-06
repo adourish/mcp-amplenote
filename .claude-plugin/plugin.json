@@ -1,0 +1,13 @@
+{
+  "name": "mcp-amplenote",
+  "version": "1.0.0",
+  "description": "Amplenote integration for Claude Code. Create, read, update, search, and manage your Amplenote notes directly from Claude.",
+  "author": {
+    "name": "Anthony Dourish",
+    "email": "adourish@gmail.com"
+  },
+  "homepage": "https://github.com/adourish/mcp-amplenote",
+  "repository": "https://github.com/adourish/mcp-amplenote",
+  "license": "MIT",
+  "keywords": ["amplenote", "notes", "knowledge-management", "mcp"]
+}
