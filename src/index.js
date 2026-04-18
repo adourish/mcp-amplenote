@@ -1,19 +1,13 @@
 #!/usr/bin/env node
 /**
- * Amplenote MCP Server for Claude Code
+ * Amplenote + Todoist MCP Server for Claude Code
  *
- * Credentials are loaded in this order:
+ * Amplenote credentials (in priority order):
  *   1. AMPLENOTE_CREDS_PATH env var → path to an amplenote-config.json file
  *   2. Direct env vars: AMPLENOTE_ACCESS_TOKEN + AMPLENOTE_REFRESH_TOKEN + AMPLENOTE_CLIENT_ID
  *
- * The config file format matches api-amplenote.json:
- *   {
- *     "oauth": { "clientId": "...", "tokenUrl": "https://api.amplenote.com/oauth/token" },
- *     "credentials": { "accessToken": "...", "refreshToken": "..." }
- *   }
- *
- * On 401, the server automatically refreshes the access token and saves the new
- * token back to the config file (if one was loaded from disk).
+ * Todoist credentials:
+ *   TODOIST_API_TOKEN env var (from https://app.todoist.com/app/settings/integrations/developer)
  */
 
 'use strict';
@@ -27,14 +21,13 @@ const {
 const https = require('https');
 const fs = require('fs');
 
-const API_HOST = 'api.amplenote.com';
-const API_BASE = '/v4';
+// ─── Amplenote Config ─────────────────────────────────────────────────────────
+
+const AMPLENOTE_HOST = 'api.amplenote.com';
+const AMPLENOTE_BASE = '/v4';
 const TOKEN_PATH = '/oauth/token';
 
-// ─── Credential Loading ───────────────────────────────────────────────────────
-
-function loadCredentials() {
-  // Option 1: config file via env var
+function loadAmplenoteCredentials() {
   const credsPath = process.env.AMPLENOTE_CREDS_PATH;
   if (credsPath && fs.existsSync(credsPath)) {
     const config = JSON.parse(fs.readFileSync(credsPath, 'utf8'));
@@ -46,8 +39,6 @@ function loadCredentials() {
       filePath: credsPath,
     };
   }
-
-  // Option 2: direct env vars
   if (process.env.AMPLENOTE_ACCESS_TOKEN) {
     return {
       accessToken: process.env.AMPLENOTE_ACCESS_TOKEN,
@@ -57,36 +48,49 @@ function loadCredentials() {
       filePath: null,
     };
   }
-
   throw new Error(
-    'Amplenote credentials not configured.\n\n' +
-    'Option 1 — config file:\n' +
-    '  Copy amplenote-config.example.json to your preferred location,\n' +
-    '  fill in your credentials, then set:\n' +
-    '    AMPLENOTE_CREDS_PATH=/path/to/your/amplenote-config.json\n\n' +
-    'Option 2 — env vars:\n' +
-    '  AMPLENOTE_ACCESS_TOKEN=your_token\n' +
-    '  AMPLENOTE_REFRESH_TOKEN=your_refresh_token\n' +
-    '  AMPLENOTE_CLIENT_ID=your_client_id\n\n' +
-    'See the plugin README for OAuth setup instructions.'
+    'Amplenote credentials not configured.\n' +
+    'Set AMPLENOTE_CREDS_PATH or AMPLENOTE_ACCESS_TOKEN env vars.'
   );
 }
 
-let creds = loadCredentials();
+let ampCreds = loadAmplenoteCredentials();
+
+// ─── Todoist Config ───────────────────────────────────────────────────────────
+
+const TODOIST_HOST = 'api.todoist.com';
+const TODOIST_BASE = '/rest/v2';
+
+function loadTodoistCredentials() {
+  if (process.env.TODOIST_API_TOKEN) {
+    return { apiToken: process.env.TODOIST_API_TOKEN };
+  }
+  throw new Error(
+    'Todoist credentials not configured.\n' +
+    'Set TODOIST_API_TOKEN env var (from https://app.todoist.com/app/settings/integrations/developer).'
+  );
+}
+
+let todoistCreds;
+try {
+  todoistCreds = loadTodoistCredentials();
+} catch (_) {
+  todoistCreds = null; // Todoist tools will return config error if called
+}
 
 // ─── HTTP Helper ──────────────────────────────────────────────────────────────
 
-function httpRequest(method, urlPath, body, token) {
+function httpRequest(hostname, method, urlPath, body, headers) {
   return new Promise((resolve, reject) => {
     const postData = body != null ? JSON.stringify(body) : null;
     const options = {
-      hostname: API_HOST,
+      hostname,
       port: 443,
       path: urlPath,
       method,
       headers: {
         'Content-Type': 'application/json',
-        ...(token ? { Authorization: `Bearer ${token}` } : {}),
+        ...headers,
         ...(postData ? { 'Content-Length': Buffer.byteLength(postData) } : {}),
       },
     };
@@ -107,44 +111,48 @@ function httpRequest(method, urlPath, body, token) {
   });
 }
 
-// ─── Token Refresh ────────────────────────────────────────────────────────────
+// ─── Amplenote: Token Refresh ─────────────────────────────────────────────────
 
-async function refreshToken() {
+async function refreshAmplenoteToken() {
   const body = {
     grant_type: 'refresh_token',
-    refresh_token: creds.refreshToken,
-    client_id: creds.clientId,
+    refresh_token: ampCreds.refreshToken,
+    client_id: ampCreds.clientId,
   };
 
-  const result = await httpRequest('POST', TOKEN_PATH, body, null);
-
+  const result = await httpRequest(AMPLENOTE_HOST, 'POST', TOKEN_PATH, body, {});
   if (result.status !== 200) {
     throw new Error(`Token refresh failed (${result.status}): ${JSON.stringify(result.body)}`);
   }
 
   const tokenData = result.body;
-  creds.accessToken = tokenData.access_token;
-  if (tokenData.refresh_token) creds.refreshToken = tokenData.refresh_token;
+  ampCreds.accessToken = tokenData.access_token;
+  if (tokenData.refresh_token) ampCreds.refreshToken = tokenData.refresh_token;
 
-  // Persist updated tokens back to config file
-  if (creds.filePath && fs.existsSync(creds.filePath)) {
-    const config = JSON.parse(fs.readFileSync(creds.filePath, 'utf8'));
+  if (ampCreds.filePath && fs.existsSync(ampCreds.filePath)) {
+    const config = JSON.parse(fs.readFileSync(ampCreds.filePath, 'utf8'));
     config.credentials.accessToken = tokenData.access_token;
     if (tokenData.refresh_token) config.credentials.refreshToken = tokenData.refresh_token;
-    fs.writeFileSync(creds.filePath, JSON.stringify(config, null, 2));
+    fs.writeFileSync(ampCreds.filePath, JSON.stringify(config, null, 2));
   }
 
   return tokenData.access_token;
 }
 
-// ─── API Call with Auto-Refresh ───────────────────────────────────────────────
+// ─── Amplenote: API Call ──────────────────────────────────────────────────────
 
-async function apiCall(method, apiPath, body = null) {
-  let result = await httpRequest(method, `${API_BASE}${apiPath}`, body, creds.accessToken);
+async function ampCall(method, apiPath, body = null) {
+  let result = await httpRequest(
+    AMPLENOTE_HOST, method, `${AMPLENOTE_BASE}${apiPath}`, body,
+    { Authorization: `Bearer ${ampCreds.accessToken}` }
+  );
 
   if (result.status === 401) {
-    await refreshToken();
-    result = await httpRequest(method, `${API_BASE}${apiPath}`, body, creds.accessToken);
+    await refreshAmplenoteToken();
+    result = await httpRequest(
+      AMPLENOTE_HOST, method, `${AMPLENOTE_BASE}${apiPath}`, body,
+      { Authorization: `Bearer ${ampCreds.accessToken}` }
+    );
   }
 
   if (result.status >= 400) {
@@ -154,15 +162,31 @@ async function apiCall(method, apiPath, body = null) {
   return result.body;
 }
 
-// ─── Tool Implementations ─────────────────────────────────────────────────────
+// ─── Todoist: API Call ────────────────────────────────────────────────────────
+
+async function todoCall(method, apiPath, body = null) {
+  if (!todoistCreds) throw new Error('Todoist not configured. Set TODOIST_API_TOKEN env var.');
+
+  const result = await httpRequest(
+    TODOIST_HOST, method, `${TODOIST_BASE}${apiPath}`, body,
+    { Authorization: `Bearer ${todoistCreds.apiToken}` }
+  );
+
+  if (result.status >= 400) {
+    throw new Error(`Todoist API ${result.status}: ${JSON.stringify(result.body)}`);
+  }
+
+  return result.body;
+}
+
+// ─── Amplenote Tool Implementations ──────────────────────────────────────────
 
 async function listNotes({ tag, since } = {}) {
   const params = [];
   if (tag) params.push(`tag=${encodeURIComponent(tag)}`);
   if (since) params.push(`since=${since}`);
   const qs = params.length ? `?${params.join('&')}` : '';
-
-  const data = await apiCall('GET', `/notes${qs}`);
+  const data = await ampCall('GET', `/notes${qs}`);
   const notes = Array.isArray(data) ? data : (data.notes || []);
   return notes.map((n) => ({
     uuid: n.uuid,
@@ -173,21 +197,21 @@ async function listNotes({ tag, since } = {}) {
 }
 
 async function getNote({ uuid }) {
-  return await apiCall('GET', `/notes/${uuid}`);
+  return await ampCall('GET', `/notes/${uuid}`);
 }
 
 async function createNote({ title, content = '', tags = [] }) {
   const body = { name: title, text: content };
   if (tags.length) body.tags = tags.map((t) => ({ text: t }));
-  return await apiCall('POST', '/notes', body);
+  return await ampCall('POST', '/notes', body);
 }
 
 async function updateNote({ uuid, content }) {
-  return await apiCall('PUT', `/notes/${uuid}`, { text: content });
+  return await ampCall('PUT', `/notes/${uuid}`, { text: content });
 }
 
 async function deleteNote({ uuid }) {
-  await apiCall('DELETE', `/notes/${uuid}`);
+  await ampCall('DELETE', `/notes/${uuid}`);
   return { success: true, uuid };
 }
 
@@ -196,7 +220,7 @@ async function insertContent({ uuid, text }) {
     type: 'INSERT_NODES',
     nodes: [{ type: 'paragraph', content: [{ type: 'text', text }] }],
   };
-  await apiCall('POST', `/notes/${uuid}/actions`, body);
+  await ampCall('POST', `/notes/${uuid}/actions`, body);
   return { success: true };
 }
 
@@ -209,12 +233,12 @@ async function insertTask({ uuid, text, important = false }) {
       content: [{ type: 'paragraph', content: [{ type: 'text', text }] }],
     }],
   };
-  await apiCall('POST', `/notes/${uuid}/actions`, body);
+  await ampCall('POST', `/notes/${uuid}/actions`, body);
   return { success: true };
 }
 
 async function searchNotes({ query }) {
-  const data = await apiCall('GET', '/notes');
+  const data = await ampCall('GET', '/notes');
   const notes = Array.isArray(data) ? data : (data.notes || []);
   const q = query.toLowerCase();
   return notes
@@ -223,21 +247,68 @@ async function searchNotes({ query }) {
       const tagMatch = (n.tags || []).some((t) => (t.text || t).toLowerCase().includes(q));
       return titleMatch || tagMatch;
     })
-    .map((n) => ({
-      uuid: n.uuid,
-      name: n.name,
-      tags: (n.tags || []).map((t) => t.text || t),
-    }));
+    .map((n) => ({ uuid: n.uuid, name: n.name, tags: (n.tags || []).map((t) => t.text || t) }));
 }
 
-async function doRefreshToken() {
-  const token = await refreshToken();
+async function doRefreshAmplenoteToken() {
+  const token = await refreshAmplenoteToken();
   return { success: true, access_token_preview: `${token.substring(0, 16)}...` };
+}
+
+// ─── Todoist Tool Implementations ─────────────────────────────────────────────
+
+async function todoListProjects() {
+  return await todoCall('GET', '/projects');
+}
+
+async function todoGetTasks({ project_id, label, priority, filter } = {}) {
+  const params = [];
+  if (project_id) params.push(`project_id=${encodeURIComponent(project_id)}`);
+  if (label) params.push(`label=${encodeURIComponent(label)}`);
+  if (priority) params.push(`priority=${priority}`);
+  if (filter) params.push(`filter=${encodeURIComponent(filter)}`);
+  const qs = params.length ? `?${params.join('&')}` : '';
+  return await todoCall('GET', `/tasks${qs}`);
+}
+
+async function todoGetTask({ id }) {
+  return await todoCall('GET', `/tasks/${id}`);
+}
+
+async function todoCreateTask({ content, description, project_id, due_string, priority, labels }) {
+  const body = { content };
+  if (description) body.description = description;
+  if (project_id) body.project_id = project_id;
+  if (due_string) body.due_string = due_string;
+  if (priority) body.priority = priority;
+  if (labels) body.labels = labels;
+  return await todoCall('POST', '/tasks', body);
+}
+
+async function todoUpdateTask({ id, content, description, due_string, priority, labels }) {
+  const body = {};
+  if (content) body.content = content;
+  if (description) body.description = description;
+  if (due_string) body.due_string = due_string;
+  if (priority) body.priority = priority;
+  if (labels) body.labels = labels;
+  return await todoCall('POST', `/tasks/${id}`, body);
+}
+
+async function todoCompleteTask({ id }) {
+  await todoCall('POST', `/tasks/${id}/close`, null);
+  return { success: true, id };
+}
+
+async function todoDeleteTask({ id }) {
+  await todoCall('DELETE', `/tasks/${id}`);
+  return { success: true, id };
 }
 
 // ─── Tool Definitions ─────────────────────────────────────────────────────────
 
 const TOOLS = [
+  // Amplenote tools
   {
     name: 'amplenote_list_notes',
     description: 'List notes from Amplenote. Optionally filter by tag or changed since a Unix timestamp.',
@@ -254,9 +325,7 @@ const TOOLS = [
     description: 'Get the full content of an Amplenote note by UUID.',
     inputSchema: {
       type: 'object',
-      properties: {
-        uuid: { type: 'string', description: 'Note UUID' },
-      },
+      properties: { uuid: { type: 'string', description: 'Note UUID' } },
       required: ['uuid'],
     },
   },
@@ -268,11 +337,7 @@ const TOOLS = [
       properties: {
         title: { type: 'string', description: 'Note title' },
         content: { type: 'string', description: 'Initial note body (plain text or markdown)' },
-        tags: {
-          type: 'array',
-          items: { type: 'string' },
-          description: 'Tags to apply to the note',
-        },
+        tags: { type: 'array', items: { type: 'string' }, description: 'Tags to apply to the note' },
       },
       required: ['title'],
     },
@@ -294,15 +359,13 @@ const TOOLS = [
     description: 'Delete an Amplenote note by UUID.',
     inputSchema: {
       type: 'object',
-      properties: {
-        uuid: { type: 'string', description: 'Note UUID' },
-      },
+      properties: { uuid: { type: 'string', description: 'Note UUID' } },
       required: ['uuid'],
     },
   },
   {
     name: 'amplenote_insert_content',
-    description: 'Append a paragraph of text into an existing Amplenote note via the actions endpoint.',
+    description: 'Append a paragraph of text into an existing Amplenote note.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -327,12 +390,10 @@ const TOOLS = [
   },
   {
     name: 'amplenote_search_notes',
-    description: 'Search notes by title or tag (case-insensitive, client-side filter over all notes).',
+    description: 'Search notes by title or tag (case-insensitive).',
     inputSchema: {
       type: 'object',
-      properties: {
-        query: { type: 'string', description: 'Search string — matched against note title and tags' },
-      },
+      properties: { query: { type: 'string', description: 'Search string — matched against note title and tags' } },
       required: ['query'],
     },
   },
@@ -341,12 +402,91 @@ const TOOLS = [
     description: 'Manually refresh the Amplenote OAuth access token and save it to the config file.',
     inputSchema: { type: 'object', properties: {} },
   },
+
+  // Todoist tools
+  {
+    name: 'todoist_list_projects',
+    description: 'List all Todoist projects.',
+    inputSchema: { type: 'object', properties: {} },
+  },
+  {
+    name: 'todoist_get_tasks',
+    description: 'Get active Todoist tasks. Optionally filter by project, label, priority, or Todoist filter string.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        project_id: { type: 'string', description: 'Filter by project ID' },
+        label: { type: 'string', description: 'Filter by label name' },
+        priority: { type: 'number', description: 'Filter by priority (1=normal, 2=medium, 3=high, 4=urgent)' },
+        filter: { type: 'string', description: 'Todoist filter string (e.g. "today", "overdue", "#Work")' },
+      },
+    },
+  },
+  {
+    name: 'todoist_get_task',
+    description: 'Get a specific Todoist task by ID.',
+    inputSchema: {
+      type: 'object',
+      properties: { id: { type: 'string', description: 'Task ID' } },
+      required: ['id'],
+    },
+  },
+  {
+    name: 'todoist_create_task',
+    description: 'Create a new Todoist task.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        content: { type: 'string', description: 'Task title/content' },
+        description: { type: 'string', description: 'Task description (markdown supported)' },
+        project_id: { type: 'string', description: 'Project ID to add the task to' },
+        due_string: { type: 'string', description: 'Natural language due date (e.g. "tomorrow", "next Monday at 9am")' },
+        priority: { type: 'number', description: 'Priority: 1=normal, 2=medium, 3=high, 4=urgent' },
+        labels: { type: 'array', items: { type: 'string' }, description: 'Label names to apply' },
+      },
+      required: ['content'],
+    },
+  },
+  {
+    name: 'todoist_update_task',
+    description: 'Update an existing Todoist task.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        id: { type: 'string', description: 'Task ID' },
+        content: { type: 'string', description: 'New task title/content' },
+        description: { type: 'string', description: 'New description' },
+        due_string: { type: 'string', description: 'New due date in natural language' },
+        priority: { type: 'number', description: 'New priority: 1=normal, 2=medium, 3=high, 4=urgent' },
+        labels: { type: 'array', items: { type: 'string' }, description: 'New label names' },
+      },
+      required: ['id'],
+    },
+  },
+  {
+    name: 'todoist_complete_task',
+    description: 'Mark a Todoist task as complete.',
+    inputSchema: {
+      type: 'object',
+      properties: { id: { type: 'string', description: 'Task ID' } },
+      required: ['id'],
+    },
+  },
+  {
+    name: 'todoist_delete_task',
+    description: 'Delete a Todoist task.',
+    inputSchema: {
+      type: 'object',
+      properties: { id: { type: 'string', description: 'Task ID' } },
+      required: ['id'],
+    },
+  },
 ];
 
 // ─── MCP Server ───────────────────────────────────────────────────────────────
 
 const server = new Server(
-  { name: 'amplenote', version: '1.0.0' },
+  { name: 'amplenote-todoist', version: '2.0.0' },
   { capabilities: { tools: {} } }
 );
 
@@ -358,6 +498,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
   try {
     let result;
     switch (name) {
+      // Amplenote
       case 'amplenote_list_notes':     result = await listNotes(args); break;
       case 'amplenote_get_note':       result = await getNote(args); break;
       case 'amplenote_create_note':    result = await createNote(args); break;
@@ -366,7 +507,15 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       case 'amplenote_insert_content': result = await insertContent(args); break;
       case 'amplenote_insert_task':    result = await insertTask(args); break;
       case 'amplenote_search_notes':   result = await searchNotes(args); break;
-      case 'amplenote_refresh_token':  result = await doRefreshToken(); break;
+      case 'amplenote_refresh_token':  result = await doRefreshAmplenoteToken(); break;
+      // Todoist
+      case 'todoist_list_projects':    result = await todoListProjects(); break;
+      case 'todoist_get_tasks':        result = await todoGetTasks(args); break;
+      case 'todoist_get_task':         result = await todoGetTask(args); break;
+      case 'todoist_create_task':      result = await todoCreateTask(args); break;
+      case 'todoist_update_task':      result = await todoUpdateTask(args); break;
+      case 'todoist_complete_task':    result = await todoCompleteTask(args); break;
+      case 'todoist_delete_task':      result = await todoDeleteTask(args); break;
       default: throw new Error(`Unknown tool: ${name}`);
     }
     return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
